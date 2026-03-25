@@ -109,6 +109,6 @@ if __name__ == "__main__":
             1,
         )
 
-    out = "output/detection_test_sahi.jpg"
+    out = "output/detection_test_sahi2.jpg"
     cv2.imwrite(out, frame)
     print(f"Saved annotated frame to: {out}")
