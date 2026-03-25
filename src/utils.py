@@ -47,7 +47,10 @@ def sec_to_timestamp(seconds: float) -> str:
 
 
 if __name__ == "__main__":
-    info = get_video_info("output/video.mp4")
+    import sys
+
+    path = sys.argv[1] if len(sys.argv) > 1 else "output/video.mp4"
+    info = get_video_info(path)
     print(f"Resolution: {info['width']}x{info['height']}")
     print(f"FPS: {info['fps']}")
     print(f"Duration: {sec_to_timestamp(info['duration_sec'])}")
