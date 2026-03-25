@@ -1,0 +1,8 @@
+ultralytics
+sahi
+yt-dlp
+opencv-python
+numpy
+PyYAML
+supervision
+librosa

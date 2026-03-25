@@ -1,0 +1,9 @@
+output/
+*.mp4
+*.m4a
+*.avi
+__pycache__/
+.ipynb_checkpoints/
+*.egg-info/
+.env
+*.pyc
