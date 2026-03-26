@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import librosa
+import yaml
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -15,8 +16,14 @@ class HighlightEvent:
     reasons: list[str] = field(default_factory=list)
 
 
+def load_config(config_path: str = "config.yaml") -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
 def detect_audio_spikes(
-    video_path: str, threshold: float = 4.0, min_gap_sec: float = 15.0
+    video_path: str, threshold: float = 2.0, min_gap_sec: float = 5.0
 ) -> list[float]:
     """Detect crowd noise spikes (goals, cheering) via audio energy.
 
@@ -28,20 +35,27 @@ def detect_audio_spikes(
     Returns:
         List of timestamps in seconds where spikes occur
     """
-    print("Analyzing audio...")
-    y, sr = librosa.load(video_path, mono=True)
+    import tempfile, subprocess
 
-    # RMS energy per frame
+    print("Analyzing audio...")
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_wav = tmp.name
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", video_path, "-ac", "1", "-ar", "22050", "-vn", tmp_wav],
+        check=True,
+        capture_output=True,
+    )
+    y, sr = librosa.load(tmp_wav, mono=True)
+    __import__("os").unlink(tmp_wav)
+
     hop_length = 512
     rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
     times = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop_length)
 
-    # Spikes = deutlich über Durchschnitt
     mean, std = rms.mean(), rms.std()
     spike_mask = rms > (mean + threshold * std)
     spike_times = times[spike_mask]
 
-    # Zu dichte Spikes zusammenfassen
     filtered = []
     last = -min_gap_sec
     for t in spike_times:
@@ -58,7 +72,7 @@ def detect_player_cluster(
     min_players: int = 4,
     cluster_radius: float = 0.15,
 ) -> Optional[tuple]:
-    """Detect if many players are clustered together (e.g. corner, goal).
+    """Detect if many players are clustered together.
 
     Args:
         detections: List of detection dicts from detect.py
@@ -83,7 +97,6 @@ def detect_player_cluster(
         ]
     )
 
-    # Für jeden Spieler: wie viele andere sind in der Nähe?
     for i, c in enumerate(centers):
         dists = np.linalg.norm(centers - c, axis=1)
         nearby = np.sum(dists < radius_px)
@@ -146,105 +159,48 @@ def score_frame(
     frame: np.ndarray,
     prev_frame: Optional[np.ndarray],
     audio_spike: bool,
+    config: dict,
 ) -> tuple[float, list[str]]:
-    """Compute highlight score for a single frame.
+    """Compute highlight score for a single frame using enabled detectors.
 
     Returns:
         (score, reasons) where score is 0.0-1.0
     """
     score = 0.0
     reasons = []
+    detectors = config["detectors"]
 
-    if detect_ball_near_goal(detections, frame.shape):
-        score += 0.4
-        reasons.append("ball_near_goal")
+    if detectors["ball_near_goal"]["enabled"]:
+        cfg = detectors["ball_near_goal"]
+        if detect_ball_near_goal(
+            detections, frame.shape, goal_margin=cfg["goal_margin"]
+        ):
+            score += cfg["weight"]
+            reasons.append("ball_near_goal")
 
-    cluster = detect_player_cluster(detections, frame.shape)
-    if cluster:
-        score += 0.3
-        reasons.append("player_cluster")
+    if detectors["player_cluster"]["enabled"]:
+        cfg = detectors["player_cluster"]
+        cluster = detect_player_cluster(
+            detections,
+            frame.shape,
+            min_players=cfg["min_players"],
+            cluster_radius=cfg["cluster_radius"],
+        )
+        if cluster:
+            score += cfg["weight"]
+            reasons.append("player_cluster")
 
-    if audio_spike:
-        score += 0.2
+    if detectors["audio_spike"]["enabled"] and audio_spike:
+        score += detectors["audio_spike"]["weight"]
         reasons.append("audio_spike")
 
-    if prev_frame is not None and detect_fast_motion(prev_frame, frame):
-        score += 0.1
-        reasons.append("fast_motion")
+    if detectors["fast_motion"]["enabled"] and prev_frame is not None:
+        cfg = detectors["fast_motion"]
+        if detect_fast_motion(prev_frame, frame, threshold=cfg["threshold"]):
+            score += cfg["weight"]
+            reasons.append("fast_motion")
 
     return score, reasons
-
-
-def extract_highlights(
-    video_path: str,
-    sahi_model,
-    score_threshold: float = 0.4,
-    padding_sec: float = 3.0,
-    sample_every_n_frames: int = 15,
-) -> list[HighlightEvent]:
-    """Run full highlight detection pipeline on a video.
-
-    Args:
-        video_path: Path to video file
-        sahi_model: Loaded SAHI model from detect.py
-        score_threshold: Minimum score to count as highlight
-        padding_sec: Seconds to add before/after highlight
-        sample_every_n_frames: Only analyze every Nth frame (speed vs accuracy)
-
-    Returns:
-        List of HighlightEvent objects
-    """
-    from src.detect import detect_frame_sahi, filter_by_class
-
-    # Audio-Spikes vorab analysieren
-    audio_spikes = detect_audio_spikes(video_path)
-    print(
-        f"Found {len(audio_spikes)} audio spikes: {[f'{t:.1f}s' for t in audio_spikes]}"
-    )
-
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-    highlight_frames = []
-    prev_frame = None
-    frame_idx = 0
-
-    print(f"Scanning {total_frames} frames (every {sample_every_n_frames})...")
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % sample_every_n_frames == 0:
-            timestamp = frame_idx / fps
-
-            # Audio-Spike in ±2s Fenster?
-            audio_spike = any(abs(t - timestamp) < 2.0 for t in audio_spikes)
-
-            # Detektionen
-            detections = detect_frame_sahi(sahi_model, frame)
-            relevant = filter_by_class(detections, ["person", "sports ball"])
-
-            # Score berechnen
-            score, reasons = score_frame(relevant, frame, prev_frame, audio_spike)
-
-            if score >= score_threshold:
-                highlight_frames.append((timestamp, score, reasons))
-
-            prev_frame = frame.copy()
-
-        frame_idx += 1
-        if frame_idx % 300 == 0:
-            print(f"  Progress: {frame_idx}/{total_frames} frames")
-
-    cap.release()
-
-    # Zusammenhängende Highlight-Frames zu Events zusammenfassen
-    events = merge_highlight_frames(highlight_frames, padding_sec)
-    print(f"Found {len(events)} highlight events")
-    return events
 
 
 def merge_highlight_frames(
@@ -281,7 +237,7 @@ def merge_highlight_frames(
                     reasons=all_reasons,
                 )
             )
-            start, best_score, all_reasons = timestamp, score, reasons
+            start, best_score, all_reasons = timestamp, score, list(reasons)
             end = start
 
     events.append(
@@ -296,77 +252,163 @@ def merge_highlight_frames(
     return events
 
 
+def extract_highlights(
+    video_path: str, sahi_model, config_path: str = "config.yaml"
+) -> list[HighlightEvent]:
+    """Run full highlight detection pipeline on a video.
+
+    Args:
+        video_path: Path to video file
+        sahi_model: Loaded SAHI model from detect.py
+        config_path: Path to config YAML file
+
+    Returns:
+        List of HighlightEvent objects
+    """
+    from src.detect import detect_frame_sahi, filter_by_class
+
+    config = load_config(config_path)
+    vid_cfg = config["video"]
+    det_cfg = config["detectors"]
+
+    # Audio nur wenn aktiviert
+    audio_spikes = []
+    if det_cfg["audio_spike"]["enabled"]:
+        audio_spikes = detect_audio_spikes(
+            video_path,
+            threshold=det_cfg["audio_spike"]["threshold"],
+            min_gap_sec=det_cfg["audio_spike"]["min_gap_sec"],
+        )
+        print(
+            f"Found {len(audio_spikes)} audio spikes: "
+            f"{[f'{t:.1f}s' for t in audio_spikes]}"
+        )
+
+    # Wenn keine visuellen Detektoren aktiv: direkt aus Audio-Spikes Events bauen
+    visual_detectors = ["ball_near_goal", "player_cluster", "fast_motion"]
+    need_visual = any(det_cfg[d]["enabled"] for d in visual_detectors)
+
+    if not need_visual:
+        print("Visual detectors disabled — using audio spikes directly.")
+        highlight_frames = [(t, 1.0, ["audio_spike"]) for t in audio_spikes]
+        return merge_highlight_frames(
+            highlight_frames,
+            padding_sec=vid_cfg["padding_sec"],
+            merge_gap_sec=vid_cfg["merge_gap_sec"],
+        )
+
+    from src.detect import detect_frame_sahi, filter_by_class
+
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    highlight_frames = []
+    prev_frame = None
+    frame_idx = 0
+
+    print(
+        f"Scanning {total_frames} frames "
+        f"(every {vid_cfg['sample_every_n_frames']})..."
+    )
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_idx % vid_cfg["sample_every_n_frames"] == 0:
+            timestamp = frame_idx / fps
+            audio_spike = any(abs(t - timestamp) < 2.0 for t in audio_spikes)
+
+            detections = detect_frame_sahi(sahi_model, frame)
+            relevant = filter_by_class(detections, ["person", "sports ball"])
+
+            score, reasons = score_frame(
+                relevant, frame, prev_frame, audio_spike, config
+            )
+
+            if score >= vid_cfg["score_threshold"]:
+                highlight_frames.append((timestamp, score, reasons))
+
+            prev_frame = frame.copy()
+
+        frame_idx += 1
+        if frame_idx % 300 == 0:
+            print(f"  Progress: {frame_idx}/{total_frames}")
+
+    cap.release()
+
+    return merge_highlight_frames(
+        highlight_frames,
+        padding_sec=vid_cfg["padding_sec"],
+        merge_gap_sec=vid_cfg["merge_gap_sec"],
+    )
+
+
 if __name__ == "__main__":
     import sys
     import os
-    import argparse
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from src.utils import get_video_info, sec_to_timestamp
-    from src.export import export_clips
+    from src.detect import load_sahi_model
+    from src.utils import sec_to_timestamp
+    from src.export import export_events
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("video", nargs="?", default="output/video.mp4")
-    parser.add_argument(
-        "--audio-only",
-        action="store_true",
-        help="Skip YOLO: detect audio spikes and export clips directly",
-    )
-    parser.add_argument(
-        "--pre", type=float, default=6.0, help="Seconds before spike (default 6s)"
-    )
-    parser.add_argument(
-        "--post", type=float, default=3.0, help="Seconds after spike (default 3s)"
-    )
-    parser.add_argument(
-        "--threshold", type=float, default=2.0, help="Audio spike threshold (std devs)"
-    )
-    parser.add_argument(
-        "--crossfade",
-        type=float,
-        default=0.5,
-        help="Crossfade duration in seconds (0 = cut)",
-    )
-    parser.add_argument("--output", default="output/highlights.mp4")
-    args = parser.parse_args()
+    video_path = sys.argv[1] if len(sys.argv) > 1 else "output/video.mp4"
+    config_path = sys.argv[2] if len(sys.argv) > 2 else "config.yaml"
 
-    video_path = args.video
-    info = get_video_info(video_path)
-    fps = info["fps"]
+    print(f"Video:  {video_path}")
+    print(f"Config: {config_path}")
 
-    if args.audio_only:
-        print("=== Audio-only mode ===")
-        spikes = detect_audio_spikes(video_path, threshold=args.threshold)
-        print(f"Found {len(spikes)} audio spikes")
-        for i, t in enumerate(spikes):
-            print(f"  [{i+1}] {sec_to_timestamp(t)}")
+    config = load_config(config_path)
+    visual_detectors = ["ball_near_goal", "player_cluster", "fast_motion"]
+    need_visual = any(config["detectors"][d]["enabled"] for d in visual_detectors)
 
-        print(
-            f"\nExporting {len(spikes)} clips (-{args.pre}s/+{args.post}s) → {args.output}"
-        )
-        export_clips(
-            video_path,
-            spikes,
-            args.output,
-            pre_sec=args.pre,
-            post_sec=args.post,
-            crossfade_sec=args.crossfade,
-        )
-        print(f"Done: {args.output}")
-
-    else:
-        from src.detect import load_sahi_model
-
+    sahi_model = None
+    if need_visual:
         print("Loading model...")
         sahi_model = load_sahi_model()
 
-        print("Extracting highlights...")
-        events = extract_highlights(video_path, sahi_model)
+    print("Extracting highlights...")
+    events = extract_highlights(video_path, sahi_model, config_path)
 
-        print("\n=== HIGHLIGHTS ===")
-        for i, e in enumerate(events):
-            print(
-                f"  [{i+1}] {sec_to_timestamp(e.start_sec)} → "
-                f"{sec_to_timestamp(e.end_sec)} "
-                f"(score: {e.score:.2f}, reasons: {e.reasons})"
-            )
+    print("\n=== HIGHLIGHTS ===")
+    for i, e in enumerate(events):
+        print(
+            f"  [{i+1}] {sec_to_timestamp(e.start_sec)} → "
+            f"{sec_to_timestamp(e.end_sec)} "
+            f"(score: {e.score:.2f}, reasons: {e.reasons})"
+        )
+
+    exp_cfg = config.get("export", {})
+    crossfade_sec = exp_cfg.get("crossfade_sec", 0.5)
+
+    # Dateiname aus aktiven Detektoren ableiten, außer explizit angegeben
+    if len(sys.argv) > 3:
+        output_path = sys.argv[3]
+    else:
+        detector_labels = {
+            "audio_spike": "audio",
+            "ball_near_goal": "ball",
+            "player_cluster": "cluster",
+            "fast_motion": "motion",
+        }
+        active = [
+            detector_labels[d]
+            for d in detector_labels
+            if config["detectors"].get(d, {}).get("enabled", False)
+        ]
+        suffix = "_".join(active) if active else "highlights"
+        default_out = exp_cfg.get("output", "output/highlights.mp4")
+        base_dir = os.path.dirname(default_out)
+        output_path = os.path.join(base_dir, f"highlights_{suffix}.mp4")
+
+    preview = exp_cfg.get("preview", False)
+    print(
+        f"\nExporting {len(events)} clips {'[preview]' if preview else ''} → {output_path}"
+    )
+    export_events(
+        video_path, events, output_path, crossfade_sec=crossfade_sec, preview=preview
+    )
+    print(f"Done: {output_path}")

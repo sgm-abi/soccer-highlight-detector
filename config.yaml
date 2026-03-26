@@ -1,0 +1,50 @@
+# ============================================================
+# Soccer Highlight Detector – Configuration
+# ============================================================
+
+model:
+  path: "yolov8x.pt"
+  confidence: 0.3
+  slice_size: 640
+  overlap: 0.2
+
+video:
+  sample_every_n_frames: 15
+  padding_sec: 3.0
+  merge_gap_sec: 4.0
+  score_threshold: 0.4
+
+# ============================================================
+# Highlight Detektoren – einzeln ein/ausschaltbar
+# ============================================================
+detectors:
+
+  ball_near_goal:
+    enabled: false
+    weight: 0.4          # Anteil am Gesamt-Score
+    goal_margin: 0.15    # Anteil der Framebreite = Torzone
+
+  player_cluster:
+    enabled: false
+    weight: 0.3
+    min_players: 4
+    cluster_radius: 0.15
+
+  audio_spike:
+    enabled: true
+    weight: 0.2
+    threshold: 2.0       # Std-Abweichungen über Durchschnitt
+    min_gap_sec: 15.0
+
+  fast_motion:
+    enabled: false
+    weight: 0.1
+    threshold: 5.0       # Optischer Fluss Schwellenwert
+
+# ============================================================
+# Export
+# ============================================================
+export:
+  output: "output/highlights.mp4"
+  crossfade_sec: 0     # Überblendung zwischen Clips (0 = harter Schnitt)
+  preview: true        # true = Titelkarten zwischen Clips zur Überprüfung
