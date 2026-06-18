@@ -49,8 +49,8 @@ def export_events(
             subprocess.run(
                 [
                     "ffmpeg", "-y",
-                    "-ss", f"{e.start_sec:.3f}",
                     "-i", video_path,
+                    "-ss", f"{e.start_sec:.3f}",
                     "-t", f"{duration:.3f}",
                     "-c", "copy",
                     clip_path,
@@ -70,12 +70,26 @@ def export_events(
     return output_path
 
 
-def _make_title_card(text: str, output_path: str, w: int, h: int, fps: float, duration: float = 1.0):
-    """Generate a black separator frame (1s). Text is printed to console only."""
+def _make_title_card(text: str, output_path: str, w: int, h: int, fps: float, duration: float = 1.5):
+    """Generate a black title card with centered text using cv2."""
+    import cv2
+    import numpy as np
+
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+    fontscale = max(1.0, h / 540)
+    thickness = max(2, int(fontscale * 2))
+    (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fontscale, thickness)
+    x = (w - text_w) // 2
+    y = (h + text_h) // 2
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, fontscale, (255, 255, 255), thickness)
+
+    png_path = output_path.replace(".mp4", ".png")
+    cv2.imwrite(png_path, img)
+
     subprocess.run(
         [
             "ffmpeg", "-y",
-            "-f", "lavfi", "-i", f"color=c=black:size={w}x{h}:rate={fps}",
+            "-loop", "1", "-i", png_path,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-t", str(duration),
             "-c:v", "libx264", "-crf", "18", "-preset", "fast",
@@ -86,6 +100,7 @@ def _make_title_card(text: str, output_path: str, w: int, h: int, fps: float, du
         check=True,
         capture_output=True,
     )
+    os.unlink(png_path)
     print(f"  → {text}")
 
 

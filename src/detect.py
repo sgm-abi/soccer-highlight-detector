@@ -19,8 +19,10 @@ def _best_device() -> str:
 
 def load_model(model_path: str = "yolov8x.pt", confidence: float = 0.3):
     """Load YOLO model for standard detection."""
+    device = _best_device()
+    print(f"Using device: {device}")
     model = YOLO(model_path)
-    model.to(_best_device())
+    model.to(device)
     return model
 
 

@@ -1,0 +1,48 @@
+# ============================================================
+# Highlight-Zusammenschnitt Konfiguration
+# ============================================================
+
+source:
+  #url: "https://youtu.be/CJIPUB0ttV4?si=lkQwRrogps4-tuJL"                  # YouTube-URL, z.B. https://youtu.be/abc123
+  path: "video.mp4"        # lokale Datei (wird verwendet wenn url leer ist)
+
+output:
+  path: "highlights_260328.mp4"
+  crossfade_sec: 0.5       # Überblendung zwischen Clips (0 = harter Schnitt)
+  # Übergangseffekt: fade, fadeblack, wipeleft, wiperight, slideright,
+  #                  zoomin, pixelize, radial, circleopen, dissolve
+  transition: "random"   # random = jedes Mal ein anderer Übergang
+
+  # Instagram-Format
+  # feed    = 4:5  (1080x1350) — normaler Post
+  # reels   = 9:16 (1080x1920) — Reels / Stories
+  # square  = 1:1  (1080x1080) — quadratisch
+  # source  = Originalformat beibehalten
+  instagram_format: "reels"
+
+# Clips: start/end im Format HH:MM:SS oder MM:SS
+highlights:
+  - start: "00:00:20"
+    end: "00:00:30"
+    label: "Tor 1"
+  - start: "00:02:07"
+    end: "00:02:15"
+    label: "Tor 1"
+  - start: "00:02:55"
+    end: "00:03:03"
+    label: "Tor 2"
+  - start: "00:03:57"
+    end: "00:04:05"
+    label: "Tor 2"
+  - start: "00:04:55"
+    end: "00:05:06"
+    label: "Tor 2"
+  - start: "00:09:00"
+    end: "00:09:10"
+    label: "Tor 2"
+  - start: "00:09:11"
+    end: "00:09:20"
+    label: "Tor 2"
+  - start: "00:09:49"
+    end: "00:09:53"
+    label: "Tor 2"

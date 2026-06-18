@@ -154,12 +154,26 @@ def detect_fast_motion(
     return float(magnitude.mean()) > threshold
 
 
+def save_detection_frame(frame: np.ndarray, detections: list, frame_idx: int):
+    """Save annotated frame with bounding boxes to output/detections/."""
+    out_dir = "output/detections/ball_near_goal"
+    os.makedirs(out_dir, exist_ok=True)
+    vis = frame.copy()
+    for d in detections:
+        x1, y1, x2, y2 = [int(v) for v in d["bbox"]]
+        color = (0, 255, 255) if d["class_name"] == "sports ball" else (0, 200, 0)
+        cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+        cv2.putText(vis, d["class_name"], (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+    cv2.imwrite(os.path.join(out_dir, f"frame_{frame_idx:06d}.jpg"), vis)
+
+
 def score_frame(
     detections: list,
     frame: np.ndarray,
     prev_frame: Optional[np.ndarray],
     audio_spike: bool,
     config: dict,
+    frame_idx: int = 0,
 ) -> tuple[float, list[str]]:
     """Compute highlight score for a single frame using enabled detectors.
 
@@ -177,6 +191,7 @@ def score_frame(
         ):
             score += cfg["weight"]
             reasons.append("ball_near_goal")
+            save_detection_frame(frame, detections, frame_idx)
 
     if detectors["player_cluster"]["enabled"]:
         cfg = detectors["player_cluster"]
@@ -297,7 +312,8 @@ def extract_highlights(
             merge_gap_sec=vid_cfg["merge_gap_sec"],
         )
 
-    from src.detect import detect_frame_sahi, filter_by_class
+    use_sahi = config.get("model", {}).get("use_sahi", True)
+    from src.detect import detect_frame_sahi, detect_frame, filter_by_class
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -305,35 +321,45 @@ def extract_highlights(
 
     highlight_frames = []
     prev_frame = None
-    frame_idx = 0
+    step = vid_cfg["sample_every_n_frames"]
+    start_sec = vid_cfg.get("start_sec", 0)
+    max_sec = vid_cfg.get("max_sec", 0)
+    start_frame = int(start_sec * fps)
+    end_frame = int((start_sec + max_sec) * fps) if max_sec else total_frames
+    end_frame = min(end_frame, total_frames)
+    n_analyzed = (end_frame - start_frame) // step
 
     print(
-        f"Scanning {total_frames} frames "
-        f"(every {vid_cfg['sample_every_n_frames']})..."
+        f"Analysiere {n_analyzed} Frames"
+        f" ({start_sec:.0f}s – {end_frame / fps:.0f}s)"
+        f" — jeden {step}. Frame..."
     )
 
-    while cap.isOpened():
+    frame_idx = start_frame
+    while frame_idx < end_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_idx % vid_cfg["sample_every_n_frames"] == 0:
-            timestamp = frame_idx / fps
-            audio_spike = any(abs(t - timestamp) < 2.0 for t in audio_spikes)
+        timestamp = frame_idx / fps
+        audio_spike = any(abs(t - timestamp) < 2.0 for t in audio_spikes)
 
-            detections = detect_frame_sahi(sahi_model, frame)
-            relevant = filter_by_class(detections, ["person", "sports ball"])
+        detections = detect_frame_sahi(sahi_model, frame) if use_sahi else detect_frame(sahi_model, frame)
+        relevant = filter_by_class(detections, ["person", "sports ball"])
 
-            score, reasons = score_frame(
-                relevant, frame, prev_frame, audio_spike, config
-            )
+        score, reasons = score_frame(
+            relevant, frame, prev_frame, audio_spike, config, frame_idx
+        )
 
-            if score >= vid_cfg["score_threshold"]:
-                highlight_frames.append((timestamp, score, reasons))
+        if score >= vid_cfg["score_threshold"]:
+            highlight_frames.append((timestamp, score, reasons))
 
-            prev_frame = frame.copy()
+        prev_frame = frame.copy()
+        frame_idx += step
 
-        frame_idx += 1
+        if frame_idx % (step * 20) == 0:
+            print(f"  {frame_idx / fps:.0f}s / {end_frame / fps:.0f}s — {len(highlight_frames)} Treffer (noch ungefiltert)")
         if frame_idx % 300 == 0:
             print(f"  Progress: {frame_idx}/{total_frames}")
 
@@ -351,7 +377,7 @@ if __name__ == "__main__":
     import os
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from src.detect import load_sahi_model
+    from src.detect import load_sahi_model, load_model
     from src.utils import sec_to_timestamp
     from src.export import export_events
 
@@ -367,8 +393,13 @@ if __name__ == "__main__":
 
     sahi_model = None
     if need_visual:
-        print("Loading model...")
-        sahi_model = load_sahi_model()
+        use_sahi = config.get("model", {}).get("use_sahi", True)
+        model_path = config.get("model", {}).get("path", "yolo11x.pt")
+        print(f"Loading model ({'SAHI' if use_sahi else 'standard'})...")
+        if use_sahi:
+            sahi_model = load_sahi_model(model_path)
+        else:
+            sahi_model = load_model(model_path)
 
     print("Extracting highlights...")
     events = extract_highlights(video_path, sahi_model, config_path)
@@ -402,7 +433,9 @@ if __name__ == "__main__":
         suffix = "_".join(active) if active else "highlights"
         default_out = exp_cfg.get("output", "output/highlights.mp4")
         base_dir = os.path.dirname(default_out)
-        output_path = os.path.join(base_dir, f"highlights_{suffix}.mp4")
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        output_path = os.path.join(base_dir, f"highlights_{suffix}_{ts}.mp4")
 
     preview = exp_cfg.get("preview", False)
     print(
@@ -411,4 +444,19 @@ if __name__ == "__main__":
     export_events(
         video_path, events, output_path, crossfade_sec=crossfade_sec, preview=preview
     )
+
+    # Config + Ergebnis neben dem Video speichern
+    run_log = {
+        "video": video_path,
+        "config": config,
+        "events": [
+            {"start": e.start_sec, "end": e.end_sec, "score": e.score, "reasons": e.reasons}
+            for e in events
+        ],
+    }
+    log_path = output_path.replace(".mp4", ".yaml")
+    with open(log_path, "w") as f:
+        yaml.dump(run_log, f, allow_unicode=True, sort_keys=False)
+
     print(f"Done: {output_path}")
+    print(f"Log:  {log_path}")

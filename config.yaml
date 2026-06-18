@@ -3,43 +3,143 @@
 # ============================================================
 
 model:
+  # Pfad zum YOLO-Modell (.pt Datei)
+  # Optionen: yolo11n.pt (schnell), yolo11m.pt (ausgewogen), yolo11x.pt (genau)
   path: "yolov8x.pt"
+
+  # Mindest-Konfidenz für eine Detektion (0.0 - 1.0)
+  # Niedriger = mehr Detektionen, aber mehr False Positives
+  # Höher = weniger Detektionen, aber zuverlässiger
   confidence: 0.3
+
+  # SAHI-Slicing aktivieren (true = genauer, false = schneller)
+  # false = ganzes Frame auf einmal, gut zum Testen
+  # true  = Frame in Patches aufteilen, besser für kleine Objekte
+  use_sahi: true
+
+  # Größe der SAHI-Patches in Pixeln (nur wenn use_sahi: true)
+  # Kleiner = bessere Erkennung kleiner Objekte, aber langsamer
+  # Größer = schneller, aber kleine Objekte werden übersehen
   slice_size: 640
+
+  # Überlappung zwischen SAHI-Patches (nur wenn use_sahi: true)
+  # Höher = weniger Lücken an Patch-Grenzen, aber langsamer
   overlap: 0.2
 
+# ============================================================
 video:
+  # Nur jedes N-te Frame analysieren
+  # 1  = jedes Frame (sehr langsam, sehr genau)
+  # 15 = jedes 15. Frame (~2x/Sekunde bei 30fps, guter Kompromiss)
+  # 30 = jedes 30. Frame (1x/Sekunde, schnell aber ungenau)
   sample_every_n_frames: 15
+
+  # Ab wann das Video analysiert wird in Sekunden (0 = von Anfang)
+  # Nützlich um Aufwärmphase zu überspringen: 600 = ab Minute 10
+  start_sec: 90
+
+  # Maximale Dauer die analysiert wird in Sekunden (0 = ganzes Video)
+  # Nützlich zum Testen: 300 = 5 Minuten ab start_sec
+  max_sec: 0
+
+  # Sekunden die vor und nach einem Highlight-Moment hinzugefügt werden
+  # 3.0 = Highlight beginnt 3s vor dem Ereignis und endet 3s danach
   padding_sec: 3.0
-  merge_gap_sec: 4.0
-  score_threshold: 0.4
+
+  # Zwei Highlight-Events werden zusammengefasst wenn sie weniger
+  # als diese Anzahl Sekunden auseinanderliegen
+  # Verhindert viele kleine Clips statt einem zusammenhängenden
+  merge_gap_sec: 10.0
+
+  # Minimaler Gesamt-Score (0.0 - 1.0) damit ein Frame als Highlight gilt
+  # Der Score ergibt sich aus der Summe der gewichteten aktiven Detektoren
+  # Beispiel: ball_near_goal (0.4) + player_cluster (0.3) = 0.7
+  # Niedrig (0.3) = viele Highlights, auch schwache Momente
+  # Hoch  (0.6) = nur sehr eindeutige Highlights
+  score_threshold: 0.5
 
 # ============================================================
 # Highlight Detektoren – einzeln ein/ausschaltbar
+#
+# Hinweis zu weight:
+#   Die Summe aller aktiven weights ergibt den maximalen Score.
+#   Empfehlung: Summe aller weights = 1.0
+#   Wenn einzelne Detektoren deaktiviert werden, score_threshold
+#   entsprechend anpassen!
 # ============================================================
 detectors:
 
   ball_near_goal:
-    enabled: false
-    weight: 0.4          # Anteil am Gesamt-Score
-    goal_margin: 0.15    # Anteil der Framebreite = Torzone
+    # Erkennt ob der Ball sich in der Torzone befindet
+    # Funktioniert über die X-Position des Balls im Frame:
+    # Tore sind links und rechts am Bildrand
+    enabled: true
+
+    # Gewichtung im Gesamt-Score (siehe Hinweis oben)
+    weight: 0.4
+
+    # Breite der Torzone als Anteil der Framebreite (0.0 - 0.5)
+    # 0.15 = die äußeren 15% links und rechts gelten als Torzone
+    # Größer = großzügigere Torzone, mehr Highlights
+    # Kleiner = nur sehr nahe am Tor, weniger Highlights
+    goal_margin: 0.15
 
   player_cluster:
-    enabled: false
+    # Erkennt ob viele Spieler eng beieinander stehen
+    # Typisch für: Eckstoß, Freistoß, Torjubel, Gedränge
+    enabled: true
+
+    # Gewichtung im Gesamt-Score
     weight: 0.3
+
+    # Mindestanzahl Spieler die eng beieinander sein müssen
+    # 4 = ab 4 Spielern in der Nähe gilt es als Cluster
     min_players: 4
+
+    # Radius des Clusters als Anteil der Framebreite (0.0 - 1.0)
+    # 0.15 = Spieler müssen innerhalb von 15% der Framebreite sein
+    # Größer = lockerer Cluster, mehr Highlights
+    # Kleiner = nur sehr dichtes Gedränge
     cluster_radius: 0.15
 
   audio_spike:
+    # Erkennt plötzliche Lautstärkeanstiege im Publikum
+    # Typisch für: Tor, knappe Chance, Foul
+    # Hinweis: Benötigt Audiokanal im Video
     enabled: true
+
+    # Gewichtung im Gesamt-Score
     weight: 0.2
-    threshold: 2.0       # Std-Abweichungen über Durchschnitt
+
+    # Empfindlichkeit: Wie viele Standardabweichungen über dem
+    # Durchschnitt muss die Lautstärke sein um als Spike zu gelten
+    # 2.0 = deutlich lauter als normal (empfohlen)
+    # 1.5 = empfindlicher, mehr False Positives
+    # 3.0 = nur sehr starke Ausreißer
+    threshold: 8.0
+
+    # Mindestabstand in Sekunden zwischen zwei Audio-Spikes
+    # Verhindert dass ein einzelnes Ereignis mehrfach gezählt wird
     min_gap_sec: 15.0
 
   fast_motion:
-    enabled: false
+    # Erkennt schnelle Bewegungen im Bild via optischem Fluss
+    # Typisch für: Schuss, Sprint, schnelle Spielzüge
+    # Hinweis: Kamerabewegung kann False Positives erzeugen
+    # Bei XbotGo-Videos (Auto-Tracking) mit Vorsicht verwenden!
+    enabled: true
+
+    # Gewichtung im Gesamt-Score
     weight: 0.1
-    threshold: 5.0       # Optischer Fluss Schwellenwert
+
+    # Schwellenwert für die mittlere optische Flussmagnitude
+    # 5.0 = moderate Bewegung (empfohlen für statische Kamera)
+    # 3.0 = empfindlicher, auch langsame Bewegungen
+    # 8.0 = nur sehr schnelle Bewegungen
+    # Hinweis: Bei Auto-Tracking Kamera höher setzen (10.0+)
+    # da die Kamerabewegung selbst bereits Fluss erzeugt
+    threshold: 5.0
+    
 
 # ============================================================
 # Export
